@@ -1,0 +1,10 @@
+[package]
+name = "pmdrtdx-bindings"
+version = "0.1.0"
+authors = ["techticks <techticksdev@gmail.com>"]
+edition = "2018"
+license = "MIT"
+description = "Automatically generated bindings for PMD: Rescue Team DX. C headers were generated with Il2CppInspector."
+
+[build-dependencies]
+bindgen = "0.59.2"

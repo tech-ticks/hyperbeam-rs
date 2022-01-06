@@ -1,0 +1,9 @@
+[package]
+name = "hyperbeam-rtdx"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+pmdrtdx-bindings = { path = "../pmdrtdx-bindings" }
+semver = "1"
+serde = { version = "1", features = ["derive"] }

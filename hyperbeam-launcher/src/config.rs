@@ -1,9 +1,10 @@
+use lazy_static;
+use serde::Deserialize;
 use std::error::Error;
 use std::fs;
-use serde::Deserialize;
-use lazy_static;
 
-pub static CONFIG_PATH: &str = "sd:/atmosphere/contents/01003D200BAA2000/romfs/hyperbeam/config.yaml";
+pub static CONFIG_PATH: &str =
+    "sd:/atmosphere/contents/01003D200BAA2000/romfs/hyperbeam/config.yaml";
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]

@@ -1,15 +1,15 @@
-use pmdrtdx_bindings::Texture2D;
-use hyperbeam_unity::texture_helpers;
-use std::error::Error;
-use std::{fmt, fs};
-use std::ffi::{CString, OsStr};
-use std::ptr::NonNull;
-use std::path::{Path, PathBuf};
-use image::GenericImageView;
-use serde::{Deserialize, Deserializer};
-use std::os::raw::c_char;
-use semver::Version;
 use hyperbeam_rtdx::modpack::{ModpackMetadata, MODPACK_BASE_PATH};
+use hyperbeam_unity::texture_helpers;
+use image::GenericImageView;
+use pmdrtdx_bindings::Texture2D;
+use semver::Version;
+use serde::{Deserialize, Deserializer};
+use std::error::Error;
+use std::ffi::{CString, OsStr};
+use std::os::raw::c_char;
+use std::path::{Path, PathBuf};
+use std::ptr::NonNull;
+use std::{fmt, fs};
 
 #[derive(Debug)]
 pub struct Modpack {
@@ -26,7 +26,7 @@ pub struct InvalidModpack {
 
 pub enum ModpackLoadResult {
     Success(Modpack),
-    Invalid(InvalidModpack)
+    Invalid(InvalidModpack),
 }
 
 #[derive(Debug)]
@@ -72,7 +72,11 @@ impl Error for ImageDimensionsError {}
 
 impl fmt::Display for ImageDimensionsError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Wrong image dimensions, expected {}x{}", self.expected_width, self.expected_height)
+        write!(
+            f,
+            "Wrong image dimensions, expected {}x{}",
+            self.expected_width, self.expected_height
+        )
     }
 }
 
@@ -104,7 +108,7 @@ impl Modpack {
         Ok(Modpack {
             metadata,
             path: path.to_owned(),
-            icon: None
+            icon: None,
         })
     }
 
@@ -118,10 +122,19 @@ impl Modpack {
         let expected_width = 250;
         let expected_height = 250;
         if image.width() as i32 != expected_width || image.height() as i32 != expected_height {
-            return Err(Box::new(ImageDimensionsError { expected_width, expected_height }));
+            return Err(Box::new(ImageDimensionsError {
+                expected_width,
+                expected_height,
+            }));
         }
 
-        Ok(texture_helpers::texture2d_from_bytes(rgba_image.as_raw(), expected_width, expected_height, false, false))
+        Ok(texture_helpers::texture2d_from_bytes(
+            rgba_image.as_raw(),
+            expected_width,
+            expected_height,
+            false,
+            false,
+        ))
     }
 
     pub fn load_icon(&mut self) -> Result<NonNull<Texture2D>, &Box<dyn Error>> {
@@ -131,13 +144,15 @@ impl Modpack {
         }
         return match self.icon.as_ref().unwrap() {
             Ok(icon) => Ok(*icon),
-            Err(e) => Err(&e)
+            Err(e) => Err(&e),
         };
     }
 
     pub fn unload_icon(&mut self) {
         if let Some(Ok(icon)) = self.icon.take() {
-            unsafe { pmdrtdx_bindings::Object_1_Destroy_1(icon.as_ptr() as _, std::ptr::null_mut()) }
+            unsafe {
+                pmdrtdx_bindings::Object_1_Destroy_1(icon.as_ptr() as _, std::ptr::null_mut())
+            }
         }
     }
 
@@ -150,10 +165,19 @@ impl Modpack {
         let expected_width = 1280;
         let expected_height = 720;
         if image.width() as i32 != expected_width || image.height() as i32 != expected_height {
-            return Err(Box::new(ImageDimensionsError { expected_width, expected_height }));
+            return Err(Box::new(ImageDimensionsError {
+                expected_width,
+                expected_height,
+            }));
         }
 
-        Ok(texture_helpers::texture2d_from_bytes(rgba_image.as_raw(), expected_width, expected_height, false, false))
+        Ok(texture_helpers::texture2d_from_bytes(
+            rgba_image.as_raw(),
+            expected_width,
+            expected_height,
+            false,
+            false,
+        ))
     }
 
     pub fn load_plugins(&self) {
@@ -191,10 +215,7 @@ pub fn load_all_modpacks() -> Result<Vec<ModpackLoadResult>, Box<dyn Error>> {
                     modpacks.push(ModpackLoadResult::Success(modpack));
                 }
                 Err(error) => {
-                    let invalid_modpack = InvalidModpack {
-                        error,
-                        path
-                    };
+                    let invalid_modpack = InvalidModpack { error, path };
                     eprintln!("Failed to load modpack data: {:?}", invalid_modpack);
                     modpacks.push(ModpackLoadResult::Invalid(invalid_modpack));
                 }

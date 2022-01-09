@@ -1,6 +1,6 @@
 use pmdrtdx_bindings as pmd;
-use std::ptr::{null, null_mut};
 use pmdrtdx_bindings::InputSystem_TouchParameter;
+use std::ptr::{null, null_mut};
 
 static mut INPUT_SYSTEM: *mut pmd::InputSystem = null_mut();
 
@@ -30,7 +30,7 @@ pub enum Button {
     ShortcutRight = 1048576,
     ShortcutLeft = 2097152,
     ShortcutUp = 4194304,
-    ShortcutDown = 8388608
+    ShortcutDown = 8388608,
 }
 
 pub fn get_button_down(button: Button) -> bool {
@@ -66,7 +66,9 @@ pub fn force_update() {
 fn get_input_system_instance() -> &'static mut pmd::InputSystem {
     unsafe {
         if INPUT_SYSTEM.is_null() {
-            INPUT_SYSTEM = pmd::Singleton_1_InputSystem__get_Instance(pmd::Singleton_1_InputSystem__get_Instance__MethodInfo);
+            INPUT_SYSTEM = pmd::Singleton_1_InputSystem__get_Instance(
+                pmd::Singleton_1_InputSystem__get_Instance__MethodInfo,
+            );
         }
         INPUT_SYSTEM.as_mut().unwrap()
     }

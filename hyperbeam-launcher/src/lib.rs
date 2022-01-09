@@ -1,38 +1,52 @@
 #![feature(proc_macro_hygiene)]
 #![feature(asm)]
 
-mod modpack;
 mod config;
+mod modpack;
+mod self_update;
 
-use modpack::{ModpackLoadResult, Modpack};
-use pmdrtdx_bindings::*;
-use std::ptr::{null_mut};
-use skyline::{hook, install_hook, install_hooks};
-use skyline::nn;
-use hyperbeam_unity::{IlString, reflect, texture_helpers};
+use crate::self_update::UpdateCheckResult;
 use hyperbeam_rtdx::input;
 use hyperbeam_rtdx::modpack::ModpackMetadata;
-use std::ffi::{CString};
-use std::os::raw::c_char;
-use std::string::String;
+use hyperbeam_unity::{reflect, texture_helpers, IlString};
 use image;
+use modpack::{Modpack, ModpackLoadResult};
+use pmdrtdx_bindings::*;
+use self_update::UpdateCheckReceiver;
+use skyline::nn;
+use skyline::{hook, install_hook, install_hooks};
+use std::cmp::{Eq, PartialEq};
+use std::ffi::CString;
+use std::mem;
+use std::os::raw::c_char;
+use std::ptr::null_mut;
+use std::string::String;
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug)]
 enum State {
     Initializing,
-    UpdateCheck,
+    UpdateCheck(UpdateCheckReceiver),
     ModpackSelect,
     PreLoadingAnimation,
     Loading,
-    Loaded
+    Loaded,
 }
 
-struct Globals<'a>{
+impl PartialEq for State {
+    fn eq(&self, other: &Self) -> bool {
+        mem::discriminant(self) == mem::discriminant(other)
+    }
+}
+impl Eq for State {}
+
+struct Globals<'a> {
     state: State,
     native_plugin_manager: *mut NativePluginManager,
     script_data_manager: *mut ScriptDataManager,
     game_flow_data_manager: *mut GameFlowDataManager,
     launcher_ui: *mut GameObject,
+    main_container: *mut GameObject,
+    pending_operation_bg: *mut GameObject,
     launcher_animation: *mut Animation,
     title_text: *mut TMP_Text,
     version_bg: *mut GameObject,
@@ -46,11 +60,13 @@ struct Globals<'a>{
 }
 
 static mut GLOBALS: Globals = Globals {
-    state: State::ModpackSelect,
+    state: State::Initializing,
     native_plugin_manager: null_mut(),
     script_data_manager: null_mut(),
     game_flow_data_manager: null_mut(),
     launcher_ui: null_mut(),
+    main_container: null_mut(),
+    pending_operation_bg: null_mut(),
     launcher_animation: null_mut(),
     title_text: null_mut(),
     version_bg: null_mut(),
@@ -60,13 +76,14 @@ static mut GLOBALS: Globals = Globals {
     modpacks: Vec::new(),
     loaded_modpack: None,
     selection_index: 0,
-    icons: [(null_mut(), null_mut()); 7]
+    icons: [(null_mut(), null_mut()); 7],
 };
 
 unsafe fn init_launcher_ui() {
     let object_type = reflect::get_unity_type(Some("UnityEngine"), "Object").unwrap();
     let animation_type = reflect::get_unity_type(Some("UnityEngine"), "Animation").unwrap();
-    let font_asset_type = reflect::get_type(Some("TMPro"), "TMP_FontAsset", "Unity.TextMeshPro").unwrap();
+    let font_asset_type =
+        reflect::get_type(Some("TMPro"), "TMP_FontAsset", "Unity.TextMeshPro").unwrap();
     let raw_image_type = reflect::get_unity_ui_type(Some("UnityEngine.UI"), "RawImage").unwrap();
 
     let mut shader_pack_wrapper = hyperbeam_unity::AssetBundleWrapper::new();
@@ -74,7 +91,9 @@ unsafe fn init_launcher_ui() {
 
     let mut ui_wrapper = hyperbeam_unity::AssetBundleWrapper::new();
     ui_wrapper.load_from_file("ui");
-    let font = ui_wrapper.load_asset("SystemMenuFont SDF_US", font_asset_type).unwrap() as *mut TMP_FontAsset;
+    let font = ui_wrapper
+        .load_asset("SystemMenuFont SDF_US", font_asset_type)
+        .unwrap() as *mut TMP_FontAsset;
     ui_wrapper.unload(false);
 
     let mut wrapper = hyperbeam_unity::AssetBundleWrapper::new();
@@ -86,28 +105,61 @@ unsafe fn init_launcher_ui() {
     let transform = GameObject_get_transform(GLOBALS.launcher_ui, null_mut());
     find_and_fix_text_meshes(transform, font);
 
-    let pending_op_text = Transform_Find(transform, IlString::new("BackgroundOverlay/PendingOperationText").as_ptr(), null_mut());
-    let go = Component_1_get_gameObject(pending_op_text as _, null_mut());
-    GameObject_SetActive(go, false, null_mut());
+    let main_container = Transform_Find(
+        transform,
+        IlString::new("MainUIContainer").as_ptr(),
+        null_mut(),
+    );
+    GLOBALS.main_container = Component_1_get_gameObject(main_container as _, null_mut());
 
-    GLOBALS.launcher_animation = GameObject_GetComponent(GLOBALS.launcher_ui as _, animation_type as _, null_mut()) as *mut Animation;
+    let pending_op_text = Transform_Find(
+        transform,
+        IlString::new("BackgroundOverlay/PendingOperationText").as_ptr(),
+        null_mut(),
+    );
+    GLOBALS.pending_operation_bg = Component_1_get_gameObject(pending_op_text as _, null_mut());
+
+    GLOBALS.launcher_animation =
+        GameObject_GetComponent(GLOBALS.launcher_ui as _, animation_type as _, null_mut())
+            as *mut Animation;
 
     for i in 0..7 {
         let container_find_path = format!("MainUIContainer/LaunchOptions/LaunchOption{}", i);
-        let image_find_path = format!("MainUIContainer/LaunchOptions/LaunchOption{}/Mask/RawImage", i);
+        let image_find_path = format!(
+            "MainUIContainer/LaunchOptions/LaunchOption{}/Mask/RawImage",
+            i
+        );
 
-        let container_transform = Transform_Find(transform, IlString::new(container_find_path).as_ptr(), null_mut());
+        let container_transform = Transform_Find(
+            transform,
+            IlString::new(container_find_path).as_ptr(),
+            null_mut(),
+        );
         let container = Component_1_get_gameObject(container_transform as _, null_mut());
-        let launch_image_transform = Transform_Find(transform, IlString::new(image_find_path).as_ptr(), null_mut());
-        let image = Component_1_GetComponent(launch_image_transform as _, raw_image_type as _, null_mut()) as *mut RawImage;
+        let launch_image_transform = Transform_Find(
+            transform,
+            IlString::new(image_find_path).as_ptr(),
+            null_mut(),
+        );
+        let image =
+            Component_1_GetComponent(launch_image_transform as _, raw_image_type as _, null_mut())
+                as *mut RawImage;
         GLOBALS.icons[i] = (container, image);
     }
 
     shader_pack_wrapper.unload(false);
 }
 
+unsafe fn start_update_check() {
+    GameObject_SetActive(GLOBALS.main_container, false, null_mut());
+    GameObject_SetActive(GLOBALS.pending_operation_bg, true, null_mut());
+
+    GLOBALS.state = State::UpdateCheck(self_update::start_check_self_update());
+}
+
 unsafe fn find_and_fix_text_meshes(root: *mut Transform, font: *mut TMP_FontAsset) {
-    let tmp_type = reflect::get_type(Some("TMPro"), "TextMeshProUGUI", "Unity.TextMeshPro").unwrap();
+    let tmp_type =
+        reflect::get_type(Some("TMPro"), "TextMeshProUGUI", "Unity.TextMeshPro").unwrap();
 
     let text = find_text(root, "MainUIContainer/Info/Title", tmp_type);
     TMP_Text_set_font(text, font, null_mut());
@@ -116,7 +168,11 @@ unsafe fn find_and_fix_text_meshes(root: *mut Transform, font: *mut TMP_FontAsse
     TMP_Text_set_alignment(text, TextAlignmentOptions__Enum_Center, null_mut());
     GLOBALS.title_text = text;
 
-    let transform = Transform_Find(root, IlString::new("MainUIContainer/Info/VersionBG").as_ptr(), null_mut());
+    let transform = Transform_Find(
+        root,
+        IlString::new("MainUIContainer/Info/VersionBG").as_ptr(),
+        null_mut(),
+    );
     GLOBALS.version_bg = Component_1_get_gameObject(transform as _, null_mut());
 
     let text = find_text(root, "MainUIContainer/Info/VersionBG/Version", tmp_type);
@@ -145,7 +201,11 @@ unsafe fn find_and_fix_text_meshes(root: *mut Transform, font: *mut TMP_FontAsse
     TMP_Text_set_alignment(text, TextAlignmentOptions__Enum_Center, null_mut());
 }
 
-unsafe fn find_text(root: *mut Transform, path: &str, text_mesh_pro_type: &mut Type) -> *mut TMP_Text {
+unsafe fn find_text(
+    root: *mut Transform,
+    path: &str,
+    text_mesh_pro_type: &mut Type,
+) -> *mut TMP_Text {
     let transform = Transform_Find(root, IlString::new(path).as_ptr(), null_mut());
     Component_1_GetComponent(transform as _, text_mesh_pro_type as _, null_mut()) as *mut TMP_Text
 }
@@ -160,46 +220,70 @@ unsafe fn show_splash_image() {
     let raw_image_type = reflect::get_unity_ui_type(Some("UnityEngine.UI"), "RawImage").unwrap();
 
     let transform = GameObject_get_transform(GLOBALS.launcher_ui, null_mut());
-    let splash_image_transform = Transform_Find(transform, IlString::new("SplashImage").as_ptr(), null_mut());
+    let splash_image_transform =
+        Transform_Find(transform, IlString::new("SplashImage").as_ptr(), null_mut());
     if splash_image_transform.is_null() {
         return;
     }
 
-    let splash_image_component = Component_1_GetComponent(splash_image_transform as _, raw_image_type as _, null_mut()) as *mut RawImage;
+    let splash_image_component =
+        Component_1_GetComponent(splash_image_transform as _, raw_image_type as _, null_mut())
+            as *mut RawImage;
     match modpack.load_splash_image() {
         Ok(splash_image) => {
-            RawImage_set_texture(splash_image_component, splash_image.as_ptr() as _, null_mut());
+            RawImage_set_texture(
+                splash_image_component,
+                splash_image.as_ptr() as _,
+                null_mut(),
+            );
             GLOBALS.splash_image = splash_image.as_ptr();
-        },
-        Err(error) => eprintln!("[hyperbeam-launcher] Failed to load splash image: {}", error)
+        }
+        Err(error) => eprintln!(
+            "[hyperbeam-launcher] Failed to load splash image: {}",
+            error
+        ),
     }
 }
 
 unsafe fn show_selected_modpack() {
     let (title_string, version_string) = match GLOBALS.selection_index {
-        0 => {
-            (format!("Pokémon Mystery Dungeon Rescue Team DX\nNintendo"), None)
-        }
+        0 => (
+            format!("Pokémon Mystery Dungeon Rescue Team DX\nNintendo"),
+            None,
+        ),
         i => {
             let load_result = &GLOBALS.modpacks[GLOBALS.selection_index as usize - 1];
 
             match load_result {
-                ModpackLoadResult::Success(modpack) => {
-                    (format!("{}\n{}", &modpack.metadata.name, &modpack.metadata.author), Some(format!("Ver. {}", modpack.metadata.version.to_string())))
-                },
+                ModpackLoadResult::Success(modpack) => (
+                    format!("{}\n{}", &modpack.metadata.name, &modpack.metadata.author),
+                    Some(format!("Ver. {}", modpack.metadata.version.to_string())),
+                ),
                 ModpackLoadResult::Invalid(invalid_modpack) => {
-                    let folder_name = invalid_modpack.path.file_name().and_then(std::ffi::OsStr::to_str).unwrap_or_default();
+                    let folder_name = invalid_modpack
+                        .path
+                        .file_name()
+                        .and_then(std::ffi::OsStr::to_str)
+                        .unwrap_or_default();
                     (format!("Broken modpack\n{}", folder_name), None)
                 }
             }
         }
     };
-    TMP_Text_set_text(GLOBALS.title_text, IlString::new(title_string).as_ptr(), null_mut());
+    TMP_Text_set_text(
+        GLOBALS.title_text,
+        IlString::new(title_string).as_ptr(),
+        null_mut(),
+    );
     match version_string {
         Some(version_string) => {
-            TMP_Text_set_text(GLOBALS.version_text, IlString::new(version_string).as_ptr(), null_mut());
+            TMP_Text_set_text(
+                GLOBALS.version_text,
+                IlString::new(version_string).as_ptr(),
+                null_mut(),
+            );
             GameObject_SetActive(GLOBALS.version_bg, true, null_mut());
-        },
+        }
         None => {
             GameObject_SetActive(GLOBALS.version_bg, false, null_mut());
         }
@@ -229,8 +313,8 @@ unsafe fn show_selected_modpack() {
                         null_mut()
                     }
                 }
-            },
-            _ => null_mut()
+            }
+            _ => null_mut(),
         };
         RawImage_set_texture(*icon, texture as _, null_mut());
     }
@@ -239,9 +323,11 @@ unsafe fn show_selected_modpack() {
 fn get_current_modpack() -> Option<&'static Modpack> {
     unsafe {
         if GLOBALS.selection_index == 0 {
-            return None
+            return None;
         }
-        if let Some(ModpackLoadResult::Success(loaded_modpack)) = &GLOBALS.modpacks.get(GLOBALS.selection_index as usize - 1) {
+        if let Some(ModpackLoadResult::Success(loaded_modpack)) =
+            &GLOBALS.modpacks.get(GLOBALS.selection_index as usize - 1)
+        {
             Some(loaded_modpack)
         } else {
             None
@@ -250,7 +336,7 @@ fn get_current_modpack() -> Option<&'static Modpack> {
 }
 
 fn selected_modpack_loadable() -> bool {
-    unsafe {GLOBALS.selection_index == 0 || get_current_modpack().is_some()}
+    unsafe { GLOBALS.selection_index == 0 || get_current_modpack().is_some() }
 }
 
 unsafe fn load_modpack(modpack: &'static Modpack) {
@@ -261,40 +347,57 @@ unsafe fn load_modpack(modpack: &'static Modpack) {
 }
 
 unsafe fn load_game() {
-    let plugin_manager_start_func = core::mem::transmute::<_, extern "C" fn(*mut NativePluginManager)>(
-        hook_native_plugin_manager_start_skyline_internal_original_fn as *const ()
-    );
+    let plugin_manager_start_func =
+        core::mem::transmute::<_, extern "C" fn(*mut NativePluginManager)>(
+            hook_native_plugin_manager_start_skyline_internal_original_fn as *const (),
+        );
     plugin_manager_start_func(GLOBALS.native_plugin_manager);
 
-    let script_data_manager_on_enable_func = core::mem::transmute::<_, extern "C" fn(*mut ScriptDataManager)>(
-        hook_script_data_manager_on_enable_skyline_internal_original_fn as *const ()
-    );
+    let script_data_manager_on_enable_func =
+        core::mem::transmute::<_, extern "C" fn(*mut ScriptDataManager)>(
+            hook_script_data_manager_on_enable_skyline_internal_original_fn as *const (),
+        );
     script_data_manager_on_enable_func(GLOBALS.script_data_manager);
 
-    let game_flow_data_manager_on_enable_func = core::mem::transmute::<_, extern "C" fn(*mut GameFlowDataManager)>(
-        hook_game_flow_data_manager_on_enable_skyline_internal_original_fn as *const ()
-    );
+    let game_flow_data_manager_on_enable_func =
+        core::mem::transmute::<_, extern "C" fn(*mut GameFlowDataManager)>(
+            hook_game_flow_data_manager_on_enable_skyline_internal_original_fn as *const (),
+        );
     game_flow_data_manager_on_enable_func(GLOBALS.game_flow_data_manager);
 }
 
 #[hook(replace = NativePluginManager_Start)]
 unsafe fn hook_native_plugin_manager_start(this_ptr: *mut NativePluginManager) {
     GLOBALS.native_plugin_manager = this_ptr;
-    let logo_image = image::io::Reader::open("rom:/hyperbeam/data/vanilla_icon.png").expect("vanilla_icon.png missing").decode().unwrap().flipv().to_rgba8();
-    GLOBALS.vanilla_icon = texture_helpers::texture2d_from_bytes(logo_image.as_raw(), 256, 256, false, false).as_ptr();
+    let logo_image = image::io::Reader::open("rom:/hyperbeam/data/vanilla_icon.png")
+        .expect("vanilla_icon.png missing")
+        .decode()
+        .unwrap()
+        .flipv()
+        .to_rgba8();
+    GLOBALS.vanilla_icon =
+        texture_helpers::texture2d_from_bytes(logo_image.as_raw(), 256, 256, false, false).as_ptr();
     init_launcher_ui();
     show_selected_modpack();
     nn::oe::FinishStartupLogo();
+
+    start_update_check();
 }
 
 #[hook(replace = ScriptDataManager_OnEnable)]
 fn hook_script_data_manager_on_enable(this_ptr: *mut ScriptDataManager) {
     println!("[hyperbeam-launcher] Prevented ScriptDataManager.OnEnable()");
-    unsafe { GLOBALS.script_data_manager = this_ptr; }
+    unsafe {
+        GLOBALS.script_data_manager = this_ptr;
+    }
 }
 
 #[hook(replace = ScriptDataStore_1_ScriptData__PreLoadData)]
-unsafe fn hook_script_data_store_script_data_pre_load_data(this_ptr: *mut ScriptDataStore_1_ScriptData_, preload_path_list: *mut List_1_System_String_, method: *mut MethodInfo) {
+unsafe fn hook_script_data_store_script_data_pre_load_data(
+    this_ptr: *mut ScriptDataStore_1_ScriptData_,
+    preload_path_list: *mut List_1_System_String_,
+    method: *mut MethodInfo,
+) {
     if GLOBALS.state == State::Loading || GLOBALS.state == State::Loaded {
         call_original!(this_ptr, preload_path_list, method);
     } else {
@@ -305,23 +408,30 @@ unsafe fn hook_script_data_store_script_data_pre_load_data(this_ptr: *mut Script
 #[hook(replace = GameFlowDataManager_OnEnable)]
 fn hook_game_flow_data_manager_on_enable(this_ptr: *mut GameFlowDataManager) {
     println!("[hyperbeam-launcher] Prevented GameFlowDataManager.OnEnable()");
-    unsafe { GLOBALS.game_flow_data_manager = this_ptr; }
+    unsafe {
+        GLOBALS.game_flow_data_manager = this_ptr;
+    }
 }
 
 #[hook(replace = SceneFlowSystem_StartMainLoop)]
-fn hook_startup_sequence_main_flow(this_ptr: *mut StartUpSequence, method: *mut MethodInfo) -> *mut IEnumerator {
+fn hook_startup_sequence_main_flow(
+    this_ptr: *mut StartUpSequence,
+    method: *mut MethodInfo,
+) -> *mut IEnumerator {
     unsafe {
         Object_1_Destroy_1(GLOBALS.launcher_ui as _, null_mut());
         Object_1_Destroy_1(GLOBALS.vanilla_icon as _, null_mut());
         if !GLOBALS.splash_image.is_null() {
             Object_1_Destroy_1(GLOBALS.splash_image as _, null_mut());
         }
-        let iter = GLOBALS.modpacks.iter_mut().filter_map(|modpack| {
-            match modpack {
+        let iter = GLOBALS
+            .modpacks
+            .iter_mut()
+            .filter_map(|modpack| match modpack {
                 ModpackLoadResult::Success(modpack) => Some(modpack),
-                _ => None
-            }
-        }).for_each(|modpack| modpack.unload_icon());
+                _ => None,
+            })
+            .for_each(|modpack| modpack.unload_icon());
         GLOBALS.state = State::Loaded;
     }
     call_original!(this_ptr, method)
@@ -344,41 +454,97 @@ unsafe fn hook_ground_manager_update(_this_ptr: *mut GroundManager) {
     let dt = Time_get_deltaTime(null_mut());
 
     let show_splash_image_anim_name = IlString::new("ShowSplashImage").as_ptr();
-    let launcher_animation_playing = Animation_get_isPlaying(GLOBALS.launcher_animation, null_mut());
+    let launcher_animation_playing =
+        Animation_get_isPlaying(GLOBALS.launcher_animation, null_mut());
 
-    if GLOBALS.state == State::ModpackSelect && !launcher_animation_playing {
-        if input::get_button(input::Button::Left) {
-            if GLOBALS.selection_index > 0 {
-                GLOBALS.selection_index -= 1;
-                show_selected_modpack();
-                Animation_Play_3(GLOBALS.launcher_animation, IlString::new("Left").as_ptr(), null_mut());
+    match &GLOBALS.state {
+        State::UpdateCheck(receiver) => {
+            if let Ok(update_check_result) = receiver.try_recv() {
+                match update_check_result {
+                    Ok(update_check_result) => {
+                        match update_check_result {
+                            UpdateCheckResult::UpdateAvailable(update) => {
+                                //update.start_update();
+                                GLOBALS.state = State::ModpackSelect;
+                                GameObject_SetActive(
+                                    GLOBALS.pending_operation_bg,
+                                    false,
+                                    null_mut(),
+                                );
+                                GameObject_SetActive(GLOBALS.main_container, true, null_mut());
+                            }
+                            UpdateCheckResult::NoUpdate => {
+                                GLOBALS.state = State::ModpackSelect;
+                                GameObject_SetActive(
+                                    GLOBALS.pending_operation_bg,
+                                    false,
+                                    null_mut(),
+                                );
+                                GameObject_SetActive(GLOBALS.main_container, true, null_mut());
+                            }
+                        };
+                    }
+                    Err(error) => {
+                        eprintln!("Update check error: {:?}", error)
+                    }
+                };
             }
         }
-        if input::get_button(input::Button::Right) {
-            if GLOBALS.selection_index < GLOBALS.modpacks.len() as i32 {
-                GLOBALS.selection_index += 1;
-                show_selected_modpack();
-                Animation_Play_3(GLOBALS.launcher_animation, IlString::new("Right").as_ptr(), null_mut());
+        State::ModpackSelect => {
+            if !launcher_animation_playing {
+                if input::get_button(input::Button::Left) {
+                    if GLOBALS.selection_index > 0 {
+                        GLOBALS.selection_index -= 1;
+                        show_selected_modpack();
+                        Animation_Play_3(
+                            GLOBALS.launcher_animation,
+                            IlString::new("Left").as_ptr(),
+                            null_mut(),
+                        );
+                    }
+                }
+                if input::get_button(input::Button::Right) {
+                    if GLOBALS.selection_index < GLOBALS.modpacks.len() as i32 {
+                        GLOBALS.selection_index += 1;
+                        show_selected_modpack();
+                        Animation_Play_3(
+                            GLOBALS.launcher_animation,
+                            IlString::new("Right").as_ptr(),
+                            null_mut(),
+                        );
+                    }
+                }
+                if input::get_button_down(input::Button::A) && selected_modpack_loadable() {
+                    GLOBALS.state = State::PreLoadingAnimation;
+                    show_splash_image();
+                    Animation_Play_3(
+                        GLOBALS.launcher_animation,
+                        show_splash_image_anim_name,
+                        null_mut(),
+                    );
+                }
             }
         }
-        if input::get_button_down(input::Button::A) && selected_modpack_loadable() {
-            GLOBALS.state = State::PreLoadingAnimation;
-            show_splash_image();
-            Animation_Play_3(GLOBALS.launcher_animation, show_splash_image_anim_name, null_mut());
-        }
-    } else if GLOBALS.state == State::PreLoadingAnimation {
-        if !launcher_animation_playing {
-            GLOBALS.state = State::Loading;
-            if let Some(modpack) = get_current_modpack() {
-                load_modpack(modpack);
+        State::PreLoadingAnimation => {
+            if !launcher_animation_playing {
+                GLOBALS.state = State::Loading;
+                if let Some(modpack) = get_current_modpack() {
+                    load_modpack(modpack);
+                }
+                load_game();
             }
-            load_game();
         }
-    }
+        _ => {}
+    };
 }
 
 fn install_launcher_hooks() {
-    install_hooks!(hook_script_data_manager_on_enable, hook_script_data_store_script_data_pre_load_data, hook_startup_sequence_main_flow, hook_game_flow_data_manager_on_enable);
+    install_hooks!(
+        hook_script_data_manager_on_enable,
+        hook_script_data_store_script_data_pre_load_data,
+        hook_startup_sequence_main_flow,
+        hook_game_flow_data_manager_on_enable
+    );
     install_hooks!(hook_native_plugin_manager_start, hook_ground_manager_update);
 }
 
@@ -387,12 +553,12 @@ unsafe fn auto_launch(id: &str) {
         // If we're auto-launching vanilla, nothing else needs to be done
         println!("[hyperbeam-launcher] Launching vanilla.");
         return;
-    } else if let Some(ModpackLoadResult::Success(modpack)) = GLOBALS.modpacks.iter().find(|modpack| {
-        match modpack {
+    } else if let Some(ModpackLoadResult::Success(modpack)) =
+        GLOBALS.modpacks.iter().find(|modpack| match modpack {
             ModpackLoadResult::Success(modpack) => &modpack.metadata.id == id,
-            ModpackLoadResult::Invalid(_) => false
-        }
-    }) {
+            ModpackLoadResult::Invalid(_) => false,
+        })
+    {
         load_modpack(modpack);
     } else {
         // Failed to auto-launch, show UI instead
@@ -402,8 +568,12 @@ unsafe fn auto_launch(id: &str) {
 
 #[skyline::main(name = "hyperbeam_launcher")]
 pub unsafe fn main() {
+    println!("???????????? OLD VERSION");
     let launch_config = config::get_config();
-    println!("[hyperbeam_launcher] Initializing with config: {:?}", launch_config);
+    println!(
+        "[hyperbeam_launcher] Initializing with config: {:?}",
+        launch_config
+    );
     GLOBALS.modpacks = modpack::load_all_modpacks().expect("Failed to load modpacks!");
 
     if let Some(auto_launch_id) = &launch_config.auto_launch {
@@ -414,6 +584,10 @@ pub unsafe fn main() {
 }
 
 #[no_mangle]
-extern "Rust" fn hbGetCurrentModpackMetadata() -> Option<ModpackMetadata> {
-    unsafe { GLOBALS.loaded_modpack.map(|modpack| modpack.metadata.clone()) }
+fn hbGetCurrentModpackMetadata() -> Option<ModpackMetadata> {
+    unsafe {
+        GLOBALS
+            .loaded_modpack
+            .map(|modpack| modpack.metadata.clone())
+    }
 }

@@ -17,3 +17,4 @@ skyline = { git = "https://github.com/ultimate-research/skyline-rs.git" }
 pmdrtdx-bindings = { path = "../pmdrtdx-bindings" }
 hyperbeam-unity = { path = "../hyperbeam-unity" }
 hyperbeam-rtdx = { path = "../hyperbeam-rtdx" }
+flate2 = "1"

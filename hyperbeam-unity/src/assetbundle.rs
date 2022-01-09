@@ -32,15 +32,10 @@ impl AssetBundleWrapper {
     }
 
     pub fn load_from_full_path(&mut self, path: &str) {
-        let result = unsafe { unity::AssetBundle_LoadFromFile(
-            IlString::new(path).as_ptr(),
-            ptr::null_mut(),
-        )};
-        self.bundle = if result.is_null() {
-            None
-        } else {
-            Some(result)
+        let result = unsafe {
+            unity::AssetBundle_LoadFromFile(IlString::new(path).as_ptr(), ptr::null_mut())
         };
+        self.bundle = if result.is_null() { None } else { Some(result) };
     }
 
     pub fn load_from_file(&mut self, name: &str) {

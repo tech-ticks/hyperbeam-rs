@@ -32,7 +32,9 @@ impl IlString {
         return self.string.is_null();
     }
 
-    pub fn len(&self) -> i32 { return unsafe {self.string.as_ref()}.unwrap().m_stringLength; }
+    pub fn len(&self) -> i32 {
+        return unsafe { self.string.as_ref() }.unwrap().m_stringLength;
+    }
 }
 
 impl From<*mut unity::String> for IlString {

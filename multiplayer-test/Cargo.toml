@@ -1,0 +1,21 @@
+[package]
+name = "multiplayer-test"
+version = "0.1.0"
+authors = ["techticks <techticksdev@gmail.com>"]
+edition = "2018"
+
+[package.metadata.skyline]
+titleid = "01003D200BAA2000"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+proc-macro2 = "=1.0.26"
+lazy_static = "1.4.0"
+skyline = { git = "https://github.com/ultimate-research/skyline-rs.git" }
+pmdrtdx-bindings = { path = "../pmdrtdx-bindings" }
+hyperbeam-unity = { path = "../hyperbeam-unity" }
+hyperbeam-rtdx = { path = "../hyperbeam-rtdx" }
+byteorder = "1.4.3"
+flate2 = "1"

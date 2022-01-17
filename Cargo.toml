@@ -4,7 +4,12 @@ members = [
     "hyperbeam-launcher",
     "hyperbeam-unity",
     "hyperbeam-rtdx",
-    "hyperbeam-essentials"
+    "hyperbeam-essentials",
+    "multiplayer-test"
+]
+
+exclude = [
+    "multiplayer-server"
 ]
 
 [profile.dev]

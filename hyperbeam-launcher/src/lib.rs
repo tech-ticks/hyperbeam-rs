@@ -381,7 +381,9 @@ unsafe fn hook_native_plugin_manager_start(this_ptr: *mut NativePluginManager) {
     show_selected_modpack();
     nn::oe::FinishStartupLogo();
 
-    start_update_check();
+    //start_update_check();
+    GLOBALS.state = State::ModpackSelect;
+    GameObject_SetActive(GLOBALS.main_container, true, null_mut());
 }
 
 #[hook(replace = ScriptDataManager_OnEnable)]
